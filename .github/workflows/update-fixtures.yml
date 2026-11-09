@@ -30,15 +30,30 @@ jobs:
 
             echo "Fetching fixtures for $DAY"
 
-            curl -fsS \
+            HTTP_CODE=$(curl -sS \
+              -w "%{http_code}" \
               -H "x-apisports-key: $API_KEY" \
               "https://v3.football.api-sports.io/fixtures?date=$DAY&timezone=Africa/Casablanca" \
-              -o data/day.json
+              -o data/day.json)
 
-            jq -e '
-              (.errors | length == 0) and
-              (.response | type == "array")
-            ' data/day.json > /dev/null
+            echo "HTTP status for $DAY: $HTTP_CODE"
+            echo "API errors:"
+            jq '.errors' data/day.json
+
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "Request failed for $DAY"
+              exit 1
+            fi
+
+            if [ "$(jq '.errors | length' data/day.json)" -gt 0 ]; then
+              echo "API returned an error for $DAY"
+              exit 1
+            fi
+
+            if [ "$(jq -r '.response | type' data/day.json)" != "array" ]; then
+              echo "Invalid response for $DAY"
+              exit 1
+            fi
 
             jq -s '
               {
