@@ -17,58 +17,56 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch weekly fixtures
+      - name: Fetch next 48 hours
         env:
           API_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           set -e
           mkdir -p data
-          echo '{"response":[],"errors":[]}' > data/fixtures.json
 
-          for i in $(seq 0 7); do
-            DAY=$(TZ=Africa/Casablanca date -d "+$i days" +%F)
+          NOW=$(date +%s)
+          LIMIT=$((NOW + 48 * 60 * 60))
 
-            echo "Fetching fixtures for $DAY"
+          echo "Fetching next fixtures..."
 
-            HTTP_CODE=$(curl -sS \
-              -w "%{http_code}" \
-              -H "x-apisports-key: $API_KEY" \
-              "https://v3.football.api-sports.io/fixtures?date=$DAY&timezone=Africa/Casablanca" \
-              -o data/day.json)
+          HTTP_CODE=$(curl -sS \
+            -w "%{http_code}" \
+            -H "x-apisports-key: $API_KEY" \
+            "https://v3.football.api-sports.io/fixtures?next=99&timezone=Africa/Casablanca" \
+            -o data/api-response.json)
 
-            echo "HTTP status for $DAY: $HTTP_CODE"
-            echo "API errors:"
-            jq '.errors' data/day.json
+          echo "HTTP status: $HTTP_CODE"
 
-            if [ "$HTTP_CODE" != "200" ]; then
-              echo "Request failed for $DAY"
-              exit 1
-            fi
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "API request failed"
+            exit 1
+          fi
 
-            if [ "$(jq '.errors | length' data/day.json)" -gt 0 ]; then
-              echo "API returned an error for $DAY"
-              exit 1
-            fi
+          echo "API errors:"
+          jq '.errors' data/api-response.json
 
-            if [ "$(jq -r '.response | type' data/day.json)" != "array" ]; then
-              echo "Invalid response for $DAY"
-              exit 1
-            fi
+          if [ "$(jq '.errors | length' data/api-response.json)" -gt 0 ]; then
+            echo "API returned an error"
+            exit 1
+          fi
 
-            jq -s '
-              {
-                response: (.[0].response + .[1].response),
-                errors: []
-              }
-            ' data/fixtures.json data/day.json > data/combined.json
+          jq --argjson now "$NOW" --argjson limit "$LIMIT" '
+            {
+              response: [
+                .response[]
+                | select(
+                    .fixture.timestamp >= $now and
+                    .fixture.timestamp <= $limit
+                  )
+              ],
+              errors: []
+            }
+          ' data/api-response.json > data/fixtures.json
 
-            mv data/combined.json data/fixtures.json
-          done
-
-          rm -f data/day.json
-
-          echo "Total weekly matches:"
+          echo "Matches in next 48 hours:"
           jq '.response | length' data/fixtures.json
+
+          rm -f data/api-response.json
 
       - name: Save updated data
         run: |
@@ -77,6 +75,6 @@ jobs:
 
           git add data/fixtures.json
 
-          git diff --cached --quiet || git commit -m "Update weekly football fixtures"
+          git diff --cached --quiet || git commit -m "Update next 48 hours fixtures"
 
           git push
