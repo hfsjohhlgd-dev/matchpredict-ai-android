@@ -24,12 +24,13 @@ jobs:
           mkdir -p data
 
           TODAY=$(TZ=Africa/Casablanca date +%F)
+          END=$(TZ=Africa/Casablanca date -d "+7 days" +%F)
 
-          echo "Fetching fixtures for: $TODAY"
+          echo "Fetching fixtures from $TODAY to $END"
 
           curl -fsS \
             -H "x-apisports-key: $API_KEY" \
-            "https://v3.football.api-sports.io/fixtures?date=$TODAY&timezone=Africa/Casablanca" \
+            "https://v3.football.api-sports.io/fixtures?from=$TODAY&to=$END&timezone=Africa/Casablanca" \
             -o data/fixtures.json
 
           echo "Checking API response..."
@@ -49,6 +50,6 @@ jobs:
 
           git add data/fixtures.json
 
-          git diff --cached --quiet || git commit -m "Update football fixtures"
+          git diff --cached --quiet || git commit -m "Update weekly football fixtures"
 
           git push
