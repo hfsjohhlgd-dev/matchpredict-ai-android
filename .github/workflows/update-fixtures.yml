@@ -1,10 +1,9 @@
-
 name: Update Football Fixtures
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */6 * * *"
+    - cron: "0 * * * *"
 
 permissions:
   contents: write
@@ -17,23 +16,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch next 48 hours
+      - name: Fetch today's fixtures
         env:
           API_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           set -e
           mkdir -p data
 
-          NOW=$(date +%s)
-          LIMIT=$((NOW + 48 * 60 * 60))
+          TODAY=$(TZ=Africa/Casablanca date +%F)
 
-          echo "Fetching next fixtures..."
+          echo "Fetching fixtures for $TODAY"
 
           HTTP_CODE=$(curl -sS \
             -w "%{http_code}" \
             -H "x-apisports-key: $API_KEY" \
-            "https://v3.football.api-sports.io/fixtures?next=99&timezone=Africa/Casablanca" \
-            -o data/api-response.json)
+            "https://v3.football.api-sports.io/fixtures?date=$TODAY" \
+            -o data/fixtures.json)
 
           echo "HTTP status: $HTTP_CODE"
 
@@ -42,31 +40,13 @@ jobs:
             exit 1
           fi
 
-          echo "API errors:"
-          jq '.errors' data/api-response.json
+          jq -e '
+            (.errors | length == 0) and
+            (.response | type == "array")
+          ' data/fixtures.json > /dev/null
 
-          if [ "$(jq '.errors | length' data/api-response.json)" -gt 0 ]; then
-            echo "API returned an error"
-            exit 1
-          fi
-
-          jq --argjson now "$NOW" --argjson limit "$LIMIT" '
-            {
-              response: [
-                .response[]
-                | select(
-                    .fixture.timestamp >= $now and
-                    .fixture.timestamp <= $limit
-                  )
-              ],
-              errors: []
-            }
-          ' data/api-response.json > data/fixtures.json
-
-          echo "Matches in next 48 hours:"
+          echo "Number of matches:"
           jq '.response | length' data/fixtures.json
-
-          rm -f data/api-response.json
 
       - name: Save updated data
         run: |
@@ -75,6 +55,6 @@ jobs:
 
           git add data/fixtures.json
 
-          git diff --cached --quiet || git commit -m "Update next 48 hours fixtures"
+          git diff --cached --quiet || git commit -m "Update football fixtures"
 
           git push
