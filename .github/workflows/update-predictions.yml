@@ -26,25 +26,36 @@ jobs:
 
           NOW=$(date +%s)
 
+          echo "Preparing predictions..."
+
           echo '{"updated_at":"","response":[]}' > data/predictions.json
 
+          echo "Total fixtures in file:"
+          jq '.response | length' data/fixtures.json
+
+          echo "Future fixtures:"
           jq --argjson now "$NOW" '
+            [.response[] | select((.fixture.timestamp // 0) > $now)]
+            | length
+          ' data/fixtures.json
+
+          jq --argjson now "$NOW" -r '
             [
               .response[]
-              | select(
-                  .fixture.timestamp > $now and
-                  .fixture.status.short == "NS"
-                )
-              | .fixture.id
+              | select((.fixture.timestamp // 0) > $now)
             ]
-            | unique
-            | .[:70][]
+            | sort_by(.fixture.timestamp)
+            | unique_by(.fixture.id)
+            | .[:50][]
+            | .fixture.id
           ' data/fixtures.json > data/fixture_ids.txt
 
           echo "Fixtures selected:"
           wc -l < data/fixture_ids.txt
 
           while read -r FIXTURE_ID; do
+            [ -z "$FIXTURE_ID" ] && continue
+
             echo "Analyzing fixture: $FIXTURE_ID"
 
             HTTP_CODE=$(curl -sS \
@@ -56,18 +67,23 @@ jobs:
             echo "HTTP status: $HTTP_CODE"
 
             if [ "$HTTP_CODE" != "200" ]; then
-              echo "Prediction request failed"
-              exit 1
+              echo "Request failed for fixture $FIXTURE_ID"
+              sleep 6
+              continue
             fi
 
-            jq '.errors' data/prediction-response.json
+            if ! jq -e '(.errors | length == 0)' data/prediction-response.json > /dev/null; then
+              echo "API error:"
+              jq '.errors' data/prediction-response.json
+              sleep 6
+              continue
+            fi
 
-            jq -e '
-              (.errors | length == 0) and
-              (.response | type == "array")
-            ' data/prediction-response.json > /dev/null
+            COUNT=$(jq '.response | length' data/prediction-response.json)
 
-            if [ "$(jq '.response | length' data/prediction-response.json)" -gt 0 ]; then
+            echo "Predictions returned: $COUNT"
+
+            if [ "$COUNT" -gt 0 ]; then
               jq --argjson id "$FIXTURE_ID" \
                 --slurpfile item data/prediction-response.json '
                 .response += [{
