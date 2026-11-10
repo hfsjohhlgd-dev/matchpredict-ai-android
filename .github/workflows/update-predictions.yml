@@ -1,0 +1,105 @@
+
+name: Update AI Predictions
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  predictions:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch predictions
+        env:
+          API_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+        run: |
+          set -e
+          mkdir -p data
+
+          NOW=$(date +%s)
+
+          echo '{"updated_at":"","response":[]}' > data/predictions.json
+
+          jq --argjson now "$NOW" '
+            [
+              .response[]
+              | select(
+                  .fixture.timestamp > $now and
+                  .fixture.status.short == "NS"
+                )
+              | .fixture.id
+            ]
+            | unique
+            | .[:70][]
+          ' data/fixtures.json > data/fixture_ids.txt
+
+          echo "Fixtures selected:"
+          wc -l < data/fixture_ids.txt
+
+          while read -r FIXTURE_ID; do
+            echo "Analyzing fixture: $FIXTURE_ID"
+
+            HTTP_CODE=$(curl -sS \
+              -w "%{http_code}" \
+              -H "x-apisports-key: $API_KEY" \
+              "https://v3.football.api-sports.io/predictions?fixture=$FIXTURE_ID" \
+              -o data/prediction-response.json)
+
+            echo "HTTP status: $HTTP_CODE"
+
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "Prediction request failed"
+              exit 1
+            fi
+
+            jq '.errors' data/prediction-response.json
+
+            jq -e '
+              (.errors | length == 0) and
+              (.response | type == "array")
+            ' data/prediction-response.json > /dev/null
+
+            if [ "$(jq '.response | length' data/prediction-response.json)" -gt 0 ]; then
+              jq --argjson id "$FIXTURE_ID" \
+                --slurpfile item data/prediction-response.json '
+                .response += [{
+                  fixture_id: $id,
+                  prediction: $item[0].response[0]
+                }]
+              ' data/predictions.json > data/temp.json
+
+              mv data/temp.json data/predictions.json
+            fi
+
+            sleep 6
+          done < data/fixture_ids.txt
+
+          jq --arg time "$(date -u +%FT%TZ)" \
+            '.updated_at = $time' \
+            data/predictions.json > data/temp.json
+
+          mv data/temp.json data/predictions.json
+
+          echo "Total predictions:"
+          jq '.response | length' data/predictions.json
+
+          rm -f data/fixture_ids.txt data/prediction-response.json
+
+      - name: Save predictions
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/predictions.json
+
+          git diff --cached --quiet || git commit -m "Update AI predictions"
+
+          git push
