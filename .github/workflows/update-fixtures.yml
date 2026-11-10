@@ -4,7 +4,7 @@ name: Update Football Fixtures
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "15 0 * * *"
 
 permissions:
   contents: write
@@ -24,43 +24,51 @@ jobs:
           set -e
           mkdir -p data
 
-          UTC_DATE=$(date -u +%F)
-
           TODAY=$(python3 -c "
           from datetime import datetime
           from zoneinfo import ZoneInfo
           print(datetime.now(ZoneInfo('Africa/Casablanca')).strftime('%Y-%m-%d'))
           ")
 
-          echo "UTC date: $UTC_DATE"
           echo "Morocco date: $TODAY"
-          echo "Fetching fixtures for Morocco date: $TODAY"
+          echo "Fetching today's fixtures..."
 
           HTTP_CODE=$(curl -sS \
             -w "%{http_code}" \
             -H "x-apisports-key: $API_KEY" \
             "https://v3.football.api-sports.io/fixtures?date=$TODAY" \
-            -o data/fixtures.json)
+            -o data/fixtures-response.json)
 
           echo "HTTP status: $HTTP_CODE"
 
           if [ "$HTTP_CODE" != "200" ]; then
-            echo "API request failed"
-            cat data/fixtures.json
+            echo "API request failed. Keeping previous fixtures."
+            cat data/fixtures-response.json
             exit 1
           fi
 
-          jq -e '
+          if ! jq -e '
             (.errors | length == 0) and
             (.response | type == "array")
-          ' data/fixtures.json > /dev/null || {
+          ' data/fixtures-response.json > /dev/null; then
+
             echo "API returned an error:"
-            jq '.errors' data/fixtures.json
+            jq '.errors' data/fixtures-response.json
+
+            if jq -e '.errors.requests != null' data/fixtures-response.json > /dev/null; then
+              echo "Daily API request limit reached. Keeping previous fixtures."
+              exit 0
+            fi
+
             exit 1
-          }
+          fi
+
+          cp data/fixtures-response.json data/fixtures.json
 
           echo "Number of matches:"
           jq '.response | length' data/fixtures.json
+
+          rm -f data/fixtures-response.json
 
       - name: Save updated data
         run: |
