@@ -1,3 +1,4 @@
+
 name: Update AI Predictions
 
 on:
@@ -16,145 +17,202 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch predictions for top leagues
+      - name: Analyze up to 20 upcoming matches
         env:
           API_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           set -e
           mkdir -p data
 
-          NOW=$(date +%s)
-
-          echo "Preparing top league predictions..."
+          if [ -z "$API_KEY" ]; then
+            echo "API key is missing."
+            exit 1
+          fi
 
           if [ ! -f data/fixtures.json ]; then
             echo "Fixtures file not found."
             exit 1
           fi
 
-          echo "Total fixtures:"
-          jq '.response | length' data/fixtures.json
+          NOW=$(date +%s)
 
-          echo "Selecting matches from top 5 leagues..."
-
-          jq --argjson now "$NOW" -r '
+          # Select the first 20 future, not-started matches.
+          jq --argjson now "$NOW" '
             [
               .response[]
               | select((.fixture.timestamp // 0) > $now)
-              | select(.fixture.id != null)
-              | select(.league.id as $id |
-                  [39, 140, 135, 78, 61] | index($id) != null
+              | select(
+                  .fixture.status.short == "NS" or
+                  .fixture.status.short == "TBD"
                 )
+              | select(.fixture.id != null)
               | {
                   id: .fixture.id,
-                  league_id: .league.id,
-                  league_name: .league.name,
-                  timestamp: .fixture.timestamp
+                  timestamp: .fixture.timestamp,
+                  date: .fixture.date,
+                  league: .league.name,
+                  country: .league.country,
+                  home: .teams.home.name,
+                  away: .teams.away.name
                 }
             ]
             | unique_by(.id)
-            | sort_by([
-                ([39, 140, 135, 78, 61] | index(.league_id)),
-                .timestamp
-              ])
-            | .[:5][]
-            | .id
-          ' data/fixtures.json > data/fixture_ids.txt
+            | sort_by(.timestamp)
+            | .[:20]
+          ' data/fixtures.json > data/candidates.json
 
-          echo "Selected matches:"
-          wc -l < data/fixture_ids.txt
+          TOTAL=$(jq 'length' data/candidates.json)
+          echo "Selected matches: $TOTAL"
 
-          if [ ! -s data/fixture_ids.txt ]; then
-            echo "No upcoming matches in the selected leagues."
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "No upcoming matches."
             exit 0
           fi
 
-          echo '{"updated_at":"","response":[]}' > data/predictions-new.json
+          echo '{"response":[]}' > data/raw-predictions.json
 
-          NEW_COUNT=0
+          FAILED=0
 
-          while read -r FIXTURE_ID; do
-            [ -z "$FIXTURE_ID" ] && continue
+          while IFS= read -r MATCH; do
+            ID=$(echo "$MATCH" | jq -r '.id')
 
-            echo "Analyzing fixture: $FIXTURE_ID"
+            echo "Analyzing fixture $ID"
 
             HTTP_CODE=$(curl -sS \
               -w "%{http_code}" \
               -H "x-apisports-key: $API_KEY" \
-              "https://v3.football.api-sports.io/predictions?fixture=$FIXTURE_ID" \
+              "https://v3.football.api-sports.io/predictions?fixture=$ID" \
               -o data/prediction-response.json)
 
-            echo "HTTP status: $HTTP_CODE"
-
             if [ "$HTTP_CODE" != "200" ]; then
-              echo "Request failed. Stopping."
+              echo "HTTP error: $HTTP_CODE"
+              FAILED=1
               break
             fi
 
             if ! jq -e '
-              (.errors // {} | length == 0) and
+              ((.errors // {} | length) == 0) and
               (.response | type == "array")
-            ' data/prediction-response.json > /dev/null; then
+            ' data/prediction-response.json >/dev/null; then
 
-              echo "API error:"
+              echo "API returned an error:"
               jq '.errors' data/prediction-response.json
 
-              if jq -e '
-                ((.errors.requests // "") | tostring |
-                test("request limit|limit for the day"; "i"))
-              ' data/prediction-response.json > /dev/null; then
-                echo "Daily request limit reached. Stopping immediately."
-                break
-              fi
-
-              echo "Skipping this fixture."
-              sleep 6
-              continue
+              FAILED=1
+              break
             fi
 
             COUNT=$(jq '.response | length' data/prediction-response.json)
 
-            echo "Predictions returned: $COUNT"
-
             if [ "$COUNT" -gt 0 ]; then
-              jq --argjson id "$FIXTURE_ID" \
-                --slurpfile item data/prediction-response.json '
+              jq --argjson match "$MATCH" \
+                --slurpfile result data/prediction-response.json '
                 .response += [{
-                  fixture_id: $id,
-                  prediction: $item[0].response[0]
+                  fixture: $match,
+                  prediction: $result[0].response[0]
                 }]
-              ' data/predictions-new.json > data/temp.json
+              ' data/raw-predictions.json > data/temp.json
 
-              mv data/temp.json data/predictions-new.json
-
-              NEW_COUNT=$((NEW_COUNT + 1))
+              mv data/temp.json data/raw-predictions.json
             fi
 
             sleep 6
-          done < data/fixture_ids.txt
 
-          echo "New predictions collected: $NEW_COUNT"
+          done < <(jq -c '.[]' data/candidates.json)
 
-          if [ "$NEW_COUNT" -gt 0 ]; then
-            jq --arg time "$(date -u +%FT%TZ)" \
-              '.updated_at = $time' \
-              data/predictions-new.json > data/temp.json
-
-            mv data/temp.json data/predictions-new.json
-            mv data/predictions-new.json data/predictions.json
-
-            echo "Predictions saved successfully."
-          else
-            echo "No new predictions. Keeping previous predictions."
+          if [ "$FAILED" -ne 0 ]; then
+            echo "API failed or quota reached."
+            echo "Keeping previous predictions."
+            exit 0
           fi
 
-          rm -f data/fixture_ids.txt
-          rm -f data/prediction-response.json
-          rm -f data/predictions-new.json
-          rm -f data/temp.json
+          # Calculate Over 3.5 using Poisson distribution.
+          python3 <<'PY'
+          import json
+          import math
+          from datetime import datetime, timezone
 
-          echo "Final predictions:"
-          jq '.response | length' data/predictions.json
+          with open("data/raw-predictions.json", encoding="utf-8") as f:
+              raw = json.load(f)
+
+          now = datetime.now(timezone.utc)
+          selected = []
+
+          def number(value):
+              try:
+                  if value is None or value == "-":
+                      return None
+                  return float(value)
+              except (ValueError, TypeError):
+                  return None
+
+          for item in raw["response"]:
+              match = item["fixture"]
+              prediction = item["prediction"]
+              goals = prediction.get("predictions", {}).get("goals", {})
+
+              home_goals = number(goals.get("home"))
+              away_goals = number(goals.get("away"))
+
+              if home_goals is None or away_goals is None:
+                  continue
+
+              if home_goals < 0 or away_goals < 0:
+                  continue
+
+              total = home_goals + away_goals
+
+              # P(total goals >= 4), assuming Poisson total goals.
+              probability = 1 - sum(
+                  math.exp(-total) * total**k / math.factorial(k)
+                  for k in range(4)
+              )
+
+              probability = max(0.0, min(1.0, probability))
+
+              if probability < 0.70:
+                  continue
+
+              selected.append({
+                  "fixture_id": match["id"],
+                  "date": match["date"],
+                  "timestamp": match["timestamp"],
+                  "league": match["league"],
+                  "country": match["country"],
+                  "home": match["home"],
+                  "away": match["away"],
+                  "expected_home_goals": home_goals,
+                  "expected_away_goals": away_goals,
+                  "expected_total_goals": round(total, 2),
+                  "probability_over_3_5": round(probability * 100, 1),
+                  "market": "Over 3.5",
+                  "prediction": prediction
+              })
+
+          selected.sort(
+              key=lambda x: x["probability_over_3_5"],
+              reverse=True
+          )
+
+          output = {
+              "updated_at": datetime.now(timezone.utc).isoformat(),
+              "market": "Over 3.5",
+              "minimum_probability": 70,
+              "response": selected[:5]
+          }
+
+          with open("data/predictions.json", "w", encoding="utf-8") as f:
+              json.dump(output, f, ensure_ascii=False, indent=2)
+
+          print("Qualified matches:", len(output["response"]))
+          for match in output["response"]:
+              print(
+                  match["home"], "vs", match["away"],
+                  "-", match["probability_over_3_5"], "%"
+              )
+          PY
+
+          echo "Analysis completed."
 
       - name: Save predictions
         run: |
@@ -163,6 +221,6 @@ jobs:
 
           git add data/predictions.json
 
-          git diff --cached --quiet || git commit -m "Update top league predictions"
+          git diff --cached --quiet || git commit -m "Update Over 3.5 goal selections"
 
           git push
