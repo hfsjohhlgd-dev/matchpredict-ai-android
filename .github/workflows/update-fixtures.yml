@@ -17,7 +17,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch fixtures for 3 days
+      - name: Fetch next 99 fixtures
         env:
           API_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
@@ -29,29 +29,15 @@ jobs:
             exit 1
           fi
 
-          DATES=$(python3 -c "
-          from datetime import datetime, timedelta
-          from zoneinfo import ZoneInfo
+          echo "Fetching next 99 upcoming fixtures..."
 
-          today = datetime.now(ZoneInfo('Africa/Casablanca')).date()
-          end = today + timedelta(days=2)
-
-          print(today.strftime('%Y-%m-%d'))
-          print(end.strftime('%Y-%m-%d'))
-          ")
-
-          TODAY=$(echo "$DATES" | sed -n '1p')
-          END_DATE=$(echo "$DATES" | sed -n '2p')
-
-          echo "Morocco start date: $TODAY"
-          echo "Morocco end date: $END_DATE"
-          echo "Fetching fixtures..."
-
-          HTTP_CODE=$(curl -sS \
+          HTTP_CODE=$(curl -sS -G \
             -w "%{http_code}" \
             -H "x-apisports-key: $API_KEY" \
-            "https://v3.football.api-sports.io/fixtures?from=$TODAY&to=$END_DATE&timezone=Africa%2FCasablanca" \
-            -o data/fixtures-response.json)
+            --data-urlencode "next=99" \
+            --data-urlencode "timezone=Africa/Casablanca" \
+            -o data/fixtures-response.json \
+            "https://v3.football.api-sports.io/fixtures")
 
           echo "HTTP status: $HTTP_CODE"
 
@@ -68,12 +54,7 @@ jobs:
 
             echo "API returned an error:"
             jq '.errors' data/fixtures-response.json
-
-            if jq -e '.errors.requests != null' data/fixtures-response.json > /dev/null; then
-              echo "Daily API request limit reached. Keeping previous fixtures."
-              exit 0
-            fi
-
+            echo "Keeping previous fixtures."
             exit 1
           fi
 
@@ -100,6 +81,6 @@ jobs:
 
           git add data/fixtures.json
 
-          git diff --cached --quiet || git commit -m "Update football fixtures"
+          git diff --cached --quiet || git commit -m "Update upcoming football fixtures"
 
           git push
