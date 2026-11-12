@@ -1,4 +1,7 @@
 {
-  "updated_at": "2026-11-10T02:48:58Z",
+  "updated_at": "2026-11-12T00:48:56.045126+00:00",
+  "market": "Over 3.5",
+  "minimum_probability": 70,
+  "method": "Heuristic Poisson estimate, not calibrated",
   "response": []
 }
