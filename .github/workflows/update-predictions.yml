@@ -1,4 +1,3 @@
-
 name: Update AI Predictions
 
 on:
@@ -36,7 +35,6 @@ jobs:
 
           NOW=$(date +%s)
 
-          # Select the first 20 future, not-started matches.
           jq --argjson now "$NOW" '
             [
               .response[]
@@ -64,11 +62,6 @@ jobs:
           TOTAL=$(jq 'length' data/candidates.json)
           echo "Selected matches: $TOTAL"
 
-          if [ "$TOTAL" -eq 0 ]; then
-            echo "No upcoming matches."
-            exit 0
-          fi
-
           echo '{"response":[]}' > data/raw-predictions.json
 
           FAILED=0
@@ -76,7 +69,7 @@ jobs:
           while IFS= read -r MATCH; do
             ID=$(echo "$MATCH" | jq -r '.id')
 
-            echo "Analyzing fixture $ID"
+            echo "Analyzing: $ID"
 
             HTTP_CODE=$(curl -sS \
               -w "%{http_code}" \
@@ -93,11 +86,9 @@ jobs:
             if ! jq -e '
               ((.errors // {} | length) == 0) and
               (.response | type == "array")
-            ' data/prediction-response.json >/dev/null; then
-
-              echo "API returned an error:"
+            ' data/prediction-response.json > /dev/null; then
+              echo "API error:"
               jq '.errors' data/prediction-response.json
-
               FAILED=1
               break
             fi
@@ -121,12 +112,10 @@ jobs:
           done < <(jq -c '.[]' data/candidates.json)
 
           if [ "$FAILED" -ne 0 ]; then
-            echo "API failed or quota reached."
-            echo "Keeping previous predictions."
-            exit 0
+            echo "Analysis incomplete. Clearing old selections."
+            echo '{"response":[]}' > data/raw-predictions.json
           fi
 
-          # Calculate Over 3.5 using Poisson distribution.
           python3 <<'PY'
           import json
           import math
@@ -135,7 +124,6 @@ jobs:
           with open("data/raw-predictions.json", encoding="utf-8") as f:
               raw = json.load(f)
 
-          now = datetime.now(timezone.utc)
           selected = []
 
           def number(value):
@@ -149,6 +137,7 @@ jobs:
           for item in raw["response"]:
               match = item["fixture"]
               prediction = item["prediction"]
+
               goals = prediction.get("predictions", {}).get("goals", {})
 
               home_goals = number(goals.get("home"))
@@ -162,7 +151,6 @@ jobs:
 
               total = home_goals + away_goals
 
-              # P(total goals >= 4), assuming Poisson total goals.
               probability = 1 - sum(
                   math.exp(-total) * total**k / math.factorial(k)
                   for k in range(4)
@@ -185,8 +173,7 @@ jobs:
                   "expected_away_goals": away_goals,
                   "expected_total_goals": round(total, 2),
                   "probability_over_3_5": round(probability * 100, 1),
-                  "market": "Over 3.5",
-                  "prediction": prediction
+                  "market": "Over 3.5"
               })
 
           selected.sort(
@@ -198,6 +185,7 @@ jobs:
               "updated_at": datetime.now(timezone.utc).isoformat(),
               "market": "Over 3.5",
               "minimum_probability": 70,
+              "method": "Heuristic Poisson estimate, not calibrated",
               "response": selected[:5]
           }
 
@@ -205,14 +193,13 @@ jobs:
               json.dump(output, f, ensure_ascii=False, indent=2)
 
           print("Qualified matches:", len(output["response"]))
+
           for match in output["response"]:
               print(
                   match["home"], "vs", match["away"],
                   "-", match["probability_over_3_5"], "%"
               )
           PY
-
-          echo "Analysis completed."
 
       - name: Save predictions
         run: |
