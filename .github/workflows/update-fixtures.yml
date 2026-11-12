@@ -17,7 +17,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch next 99 fixtures
+      - name: Fetch today's fixtures
         env:
           API_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
@@ -29,12 +29,19 @@ jobs:
             exit 1
           fi
 
-          echo "Fetching next 99 upcoming fixtures..."
+          TODAY=$(python3 -c "
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          print(datetime.now(ZoneInfo('Africa/Casablanca')).strftime('%Y-%m-%d'))
+          ")
+
+          echo "Morocco date: $TODAY"
+          echo "Fetching all leagues for today..."
 
           HTTP_CODE=$(curl -sS -G \
             -w "%{http_code}" \
             -H "x-apisports-key: $API_KEY" \
-            --data-urlencode "next=99" \
+            --data-urlencode "date=$TODAY" \
             --data-urlencode "timezone=Africa/Casablanca" \
             -o data/fixtures-response.json \
             "https://v3.football.api-sports.io/fixtures")
@@ -51,19 +58,17 @@ jobs:
             ((.errors // {} | length) == 0) and
             (.response | type == "array")
           ' data/fixtures-response.json > /dev/null; then
-
             echo "API returned an error:"
             jq '.errors' data/fixtures-response.json
-            echo "Keeping previous fixtures."
             exit 1
           fi
 
           cp data/fixtures-response.json data/fixtures.json
 
-          echo "Total fixtures received:"
+          echo "Total matches:"
           jq '.response | length' data/fixtures.json
 
-          echo "Upcoming not-started fixtures:"
+          echo "Not-started matches:"
           jq '[
             .response[]
             | select(
@@ -81,6 +86,7 @@ jobs:
 
           git add data/fixtures.json
 
-          git diff --cached --quiet || git commit -m "Update upcoming football fixtures"
+          git diff --cached --quiet || git commit -m "Update today's football fixtures"
 
           git push
+
