@@ -1,4 +1,3 @@
-
 name: Update Football Fixtures
 
 on:
@@ -89,4 +88,3 @@ jobs:
           git diff --cached --quiet || git commit -m "Update today's football fixtures"
 
           git push
-
